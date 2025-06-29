@@ -3,7 +3,7 @@
 -- Description: Create and manage RoE profiles with configurable settings
 
 addon.name    = 'roe'
-addon.version = '1.0'
+addon.version = '1.0.1'
 addon.author  = 'Original by Cair, ported by Commandobill'
 addon.desc    = 'Create and activate RoE profiles'
 addon.link    = 'https://github.com/commandobill/roe'
@@ -181,11 +181,14 @@ end
 ashita.events.register('packet_in','roe_in', function(e)
     if e.id == 0x111 then
         roe.active = S{}
-        for i = 1, roe.max_count do
-            local off  = 5 + ((i - 1) * 4)
-            local qid  = struct.unpack('h', e.data, off)
-            local prog = struct.unpack('h', e.data, off + 2)
-            if qid > 0 then roe.active[qid] = prog end
+            for i = 1, roe.max_count do
+            local off   = 5 + ((i - 1) * 4)
+            local word  = struct.unpack('I', e.data, off)   -- 32-bit LE
+            local qid   = bit.band(word, 0xFFF)             -- lower 12 bits
+            local prog  = bit.rshift(word, 12)              -- upper 20 bits
+            if qid > 0 then
+                roe.active[qid] = prog                      -- store progress %
+            end
         end
     elseif e.id == 0x112 then
         local done = S{}
