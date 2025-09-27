@@ -57,6 +57,24 @@ All commands use the `/roe` prefix:
 /roe <subcommand> [arguments]
 ```
 
+### ➕ Add/Remove an RoE by ID or Name
+
+```bash
+/roe add <id or name>
+    Add a specific ROE objective by its ID number or name.
+    Examples:
+    /roe add 77
+    /roe add "spoils light crystal"
+    /roe add "vanquish enemy"
+
+/roe rem <id or name>
+    Remove a specific ROE objective by its ID number or name.
+    Examples:
+    /roe rem 77
+    /roe rem "spoils light crystal"
+    /roe rem "vanquish enemy"
+```
+
 ### 💾 Save a Profile
 
 ```bash
