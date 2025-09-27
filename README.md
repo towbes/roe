@@ -73,6 +73,18 @@ All commands use the `/roe` prefix:
     /roe rem 77
     /roe rem "spoils light crystal"
     /roe rem "vanquish enemy"
+
+/roe addall <name>
+    Add all ROE objectives matching the name (max 10 matches).
+    Examples:
+    /roe addall "crystal"
+    /roe addall "vanquish"
+
+/roe remall <name>
+    Remove all ROE objectives matching the name (max 10 matches).
+    Examples:
+    /roe remall "crystal"
+    /roe remall "vanquish"
 ```
 
 ### 💾 Save a Profile
