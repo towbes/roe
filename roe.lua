@@ -13,6 +13,7 @@ local chat      = require('chat')
 local struct    = require('struct')
 local bit       = require('bit')
 local coroutine = coroutine
+local roe_mapping = require('roe_mapping')
 
 -- Print error message
 local function eprint(msg) print(chat.header('roe') .. chat.error(msg)) end
@@ -20,11 +21,96 @@ local function eprint(msg) print(chat.header('roe') .. chat.error(msg)) end
 -- Print normal message
 local function nprint(msg) print(chat.header('roe') .. chat.message(msg)) end
 
+-- Fuzzy string matching function using Ashita v4 string utilities
+local function fuzzy_match(search_term, target_string)
+    -- Normalize strings: lowercase, remove punctuation, clean whitespace
+    search_term = search_term:lower():gsub('[%p]+', ' '):clean()
+    target_string = target_string:lower():gsub('[%p]+', ' '):clean()
+    
+    -- Split into words using Ashita's split function
+    local search_words = search_term:split(' ')
+    local target_words = target_string:split(' ')
+    
+    -- Debug: Print detailed matching info for crystal objectives
+    if target_string:find('crystal') and search_term:find('crystal') then
+        nprint(('Debug fuzzy_match: search="%s" target="%s"'):format(search_term, target_string))
+        nprint(('Debug: search_words=%s'):format(table.concat(search_words, ',')))
+        nprint(('Debug: target_words=%s'):format(table.concat(target_words, ',')))
+    end
+    
+    -- Check if all search words are found in target using exact word matches
+    local matches = 0
+    local total_possible_matches = 0
+    
+    for _, search_word in ipairs(search_words) do
+        if search_word:len() > 0 then  -- Skip empty words
+            total_possible_matches = total_possible_matches + 1
+            for _, target_word in ipairs(target_words) do
+                -- Use exact word match instead of contains for better precision
+                if target_word == search_word then
+                    matches = matches + 1
+                    break
+                end
+            end
+        end
+    end
+    
+    -- Calculate final score
+    local final_score
+    if matches == total_possible_matches then
+        -- All search words found - this is a perfect match regardless of extra words
+        final_score = 1.0
+    else
+        -- Partial match - score based on percentage of search words found
+        final_score = matches / total_possible_matches
+    end
+    
+    -- Debug: Print score for crystal objectives
+    if target_string:find('crystal') and search_term:find('crystal') then
+        nprint(('Debug: matches=%d/%d, final_score=%.2f'):format(matches, total_possible_matches, final_score))
+    end
+    
+    return final_score
+end
+
+-- Find RoE objectives by name using fuzzy matching
+local function find_roe_by_name(search_term, require_all_words)
+    local results = {}
+    local min_score = require_all_words and 1.0 or 0.5  -- Require 100% match for bulk operations
+    
+    -- Debug: Print search term and min_score
+    nprint(('Debug: Searching for "%s" with min_score %.1f'):format(search_term, min_score))
+    
+    for id, name in pairs(roe_mapping) do
+        local score = fuzzy_match(search_term, name)
+        if score >= min_score then
+            results[#results + 1] = {
+                id = id,
+                name = name,
+                score = score
+            }
+            -- Debug: Print when we add a result
+            if name:find('Crystal') then
+                nprint(('Debug: Added result %d: "%s" (score=%.2f)'):format(id, name, score))
+            end
+        end
+    end
+    
+    -- Debug: Print number of results found
+    nprint(('Debug: Found %d results'):format(#results))
+    
+    -- Sort by score (highest first)
+    table.sort(results, function(a, b) return a.score > b.score end)
+    
+    return results
+end
+
 -- Send RoE packet with a given packet ID and objective ID
 local function send_roe_packet(pid, roe_id)
     local pkt = struct.pack('bbbbHbb', pid, 0x04, 0x00, 0x00, roe_id, 0x00, 0x00):totable()
     AshitaCore:GetPacketManager():AddOutgoingPacket(pid, pkt)
 end
+
 
 -- Create a new set object with utility methods
 local function _new_set(values)
@@ -243,6 +329,379 @@ local function blacklist(action, id)
     config.save()
 end
 
+-- Add a specific RoE objective by ID or name
+local function add_roe(input)
+    
+    -- Try to parse as number first
+    local id = tonumber(input)
+    
+    if id then
+        -- Input is a number, treat as ID
+        if roe.complete[id] then 
+            local name = roe_mapping[id] or "Unknown"
+            eprint(('RoE objective %d (%s) is already completed'):format(id, name))
+            return 
+        end
+        if roe.active[id] then 
+            local name = roe_mapping[id] or "Unknown"
+            eprint(('RoE objective %d (%s) is already active'):format(id, name))
+            return 
+        end
+        if id >= 4008 and id <= 4021 then 
+            local name = roe_mapping[id] or "Unknown"
+            eprint(('RoE objective %d (%s) cannot be added (auto hourly objectives)'):format(id, name))
+            return 
+        end
+        
+        accept_roe(id)
+        local name = roe_mapping[id] or "Unknown"
+        nprint(('Added RoE objective %d: %s'):format(id, name))
+    else
+        -- Input is not a number, treat as name search
+        local results = find_roe_by_name(input)
+        
+        if #results == 0 then
+            eprint(('No RoE objectives found matching "%s"'):format(input))
+            return
+        elseif #results == 1 then
+            local result = results[1]
+            if roe.complete[result.id] then 
+                eprint(('RoE objective %d (%s) is already completed'):format(result.id, result.name))
+                return 
+            end
+            if roe.active[result.id] then 
+                eprint(('RoE objective %d (%s) is already active'):format(result.id, result.name))
+                return 
+            end
+            if result.id >= 4008 and result.id <= 4021 then 
+                eprint(('RoE objective %d (%s) cannot be added (restricted range)'):format(result.id, result.name))
+                return 
+            end
+            
+            accept_roe(result.id)
+            nprint(('Added RoE objective %d: %s'):format(result.id, result.name))
+        else
+            -- Multiple matches found - check if there's a 100% match
+            local perfect_match = nil
+            for _, result in ipairs(results) do
+                if result.score == 1.0 then
+                    perfect_match = result
+                    break
+                end
+            end
+            
+            if perfect_match then
+                -- Use the perfect match automatically
+                if roe.complete[perfect_match.id] then 
+                    eprint(('RoE objective %d (%s) is already completed'):format(perfect_match.id, perfect_match.name))
+                    return 
+                end
+                if roe.active[perfect_match.id] then 
+                    eprint(('RoE objective %d (%s) is already active'):format(perfect_match.id, perfect_match.name))
+                    return 
+                end
+                if perfect_match.id >= 4008 and perfect_match.id <= 4021 then 
+                    eprint(('RoE objective %d (%s) cannot be added (restricted range)'):format(perfect_match.id, perfect_match.name))
+                    return 
+                end
+                
+                accept_roe(perfect_match.id)
+                nprint(('Added RoE objective %d: %s'):format(perfect_match.id, perfect_match.name))
+            else
+                -- No perfect match, show multiple results
+                eprint(('Multiple RoE objectives found matching "%s":'):format(input))
+                for i = 1, math.min(5, #results) do  -- Show top 5 matches
+                    local result = results[i]
+                    nprint(('  %d: %s (%.0f%% match)'):format(result.id, result.name, result.score * 100))
+                end
+                if #results > 5 then
+                    nprint(('  ... and %d more matches'):format(#results - 5))
+                end
+                eprint('Please be more specific or use the ID directly.')
+            end
+        end
+    end
+end
+
+-- Remove a specific RoE objective by ID or name
+local function rem_roe(input)
+    -- Check if we have 0 active RoEs (status needs refresh)
+    if roe.active:length() == 0 then
+        eprint('No active RoE objectives detected. Please add an RoE objective to refresh the status.')
+        return
+    end
+    
+    -- Try to parse as number first
+    local id = tonumber(input)
+    
+    if id then
+        -- Input is a number, treat as ID
+        if not roe.active[id] then 
+            local name = roe_mapping[id] or "Unknown"
+            eprint(('RoE objective %d (%s) is not currently active'):format(id, name))
+            return 
+        end
+        if roe.settings.blacklist[id] then
+            local name = roe_mapping[id] or "Unknown"
+            eprint(('RoE objective %d (%s) is blacklisted and cannot be removed'):format(id, name))
+            return 
+        end
+        
+        cancel_roe(id)
+        local name = roe_mapping[id] or "Unknown"
+        nprint(('Removed RoE objective %d: %s'):format(id, name))
+    else
+        -- Input is not a number, treat as name search
+        local results = find_roe_by_name(input)
+        
+        if #results == 0 then
+            eprint(('No RoE objectives found matching "%s"'):format(input))
+            return
+        elseif #results == 1 then
+            local result = results[1]
+            if not roe.active[result.id] then 
+                eprint(('RoE objective %d (%s) is not currently active'):format(result.id, result.name))
+                return 
+            end
+            if roe.settings.blacklist[result.id] then
+                eprint(('RoE objective %d (%s) is blacklisted and cannot be removed'):format(result.id, result.name))
+                return 
+            end
+            
+            cancel_roe(result.id)
+            nprint(('Removed RoE objective %d: %s'):format(result.id, result.name))
+        else
+            -- Multiple matches found - check if there's a 100% match
+            local perfect_match = nil
+            for _, result in ipairs(results) do
+                if result.score == 1.0 then
+                    perfect_match = result
+                    break
+                end
+            end
+            
+            if perfect_match then
+                -- Use the perfect match automatically
+                if not roe.active[perfect_match.id] then 
+                    eprint(('RoE objective %d (%s) is not currently active'):format(perfect_match.id, perfect_match.name))
+                    return 
+                end
+                if roe.settings.blacklist[perfect_match.id] then
+                    eprint(('RoE objective %d (%s) is blacklisted and cannot be removed'):format(perfect_match.id, perfect_match.name))
+                    return 
+                end
+                
+                cancel_roe(perfect_match.id)
+                nprint(('Removed RoE objective %d: %s'):format(perfect_match.id, perfect_match.name))
+            else
+                -- No perfect match, show multiple results
+                eprint(('Multiple RoE objectives found matching "%s":'):format(input))
+                for i = 1, math.min(5, #results) do  -- Show top 5 matches
+                    local result = results[i]
+                    local status = ""
+                    if not roe.active[result.id] then
+                        status = " (not active)"
+                    elseif roe.settings.blacklist[result.id] then
+                        status = " (blacklisted)"
+                    end
+                    nprint(('  %d: %s (%.0f%% match)%s'):format(result.id, result.name, result.score * 100, status))
+                end
+                if #results > 5 then
+                    nprint(('  ... and %d more matches'):format(#results - 5))
+                end
+                eprint('Please be more specific or use the ID directly.')
+            end
+        end
+    end
+end
+
+-- Add multiple RoE objectives by name using fuzzy matching
+local function addall_roe(input)
+    
+    -- Only works with name search, not ID
+    local id = tonumber(input)
+    if id then
+        eprint('addall: use "add" command for specific ID numbers')
+        return
+    end
+    
+    -- Search for matches (require all words to match for bulk operations)
+    local results = find_roe_by_name(input, true)
+    
+    if #results == 0 then
+        eprint(('No RoE objectives found matching "%s"'):format(input))
+        return
+    elseif #results > 10 then
+        eprint(('Too many RoE objectives found matching "%s" (%d matches)'):format(input, #results))
+        eprint('Showing first 10 matches:')
+        for i = 1, 10 do
+            local result = results[i]
+            local status = ""
+            if roe.complete[result.id] then
+                status = " (completed)"
+            elseif roe.active[result.id] then
+                status = " (active)"
+            elseif result.id >= 4008 and result.id <= 4021 then
+                status = " (restricted)"
+            end
+            nprint(('  %d: %s (%.0f%% match)%s'):format(result.id, result.name, result.score * 100, status))
+        end
+        eprint('Please be more specific or use individual IDs.')
+        return
+    end
+    
+    -- Check available slots
+    local available_slots = roe.max_count - roe.active:length()
+    local objectives_to_add = 0
+    
+    -- Count how many objectives we can actually add
+    for _, result in ipairs(results) do
+        if not roe.complete[result.id] and not roe.active[result.id] and not (result.id >= 4008 and result.id <= 4021) then
+            objectives_to_add = objectives_to_add + 1
+        end
+    end
+    
+    if objectives_to_add > available_slots then
+        eprint("not enough free ROE slots. Additional slots needed: " .. (objectives_to_add - available_slots))
+        eprint(('Found %d objectives to add, but only %d slots available'):format(objectives_to_add, available_slots))
+        return
+    end
+    
+    -- Process all matches
+    local added_count = 0
+    local skipped_count = 0
+    local skipped_reasons = {}
+    
+    for _, result in ipairs(results) do
+        if roe.complete[result.id] then 
+            skipped_count = skipped_count + 1
+            skipped_reasons[#skipped_reasons + 1] = ('%d (%s) - already completed'):format(result.id, result.name)
+        elseif roe.active[result.id] then 
+            skipped_count = skipped_count + 1
+            skipped_reasons[#skipped_reasons + 1] = ('%d (%s) - already active'):format(result.id, result.name)
+        elseif result.id >= 4008 and result.id <= 4021 then 
+            skipped_count = skipped_count + 1
+            skipped_reasons[#skipped_reasons + 1] = ('%d (%s) - restricted range'):format(result.id, result.name)
+        else
+            accept_roe(result.id)
+            coroutine.sleep(0.5)
+            added_count = added_count + 1
+        end
+    end
+    
+    -- Report results
+    if added_count > 0 then
+        nprint(('Added %d RoE objectives matching "%s"'):format(added_count, input))
+    end
+    
+    if skipped_count > 0 then
+        eprint(('Skipped %d objectives:'):format(skipped_count))
+        for _, reason in ipairs(skipped_reasons) do
+            eprint(('  %s'):format(reason))
+        end
+    end
+    
+    if added_count == 0 and skipped_count == 0 then
+        eprint(('No objectives were processed for "%s"'):format(input))
+    end
+end
+
+-- Remove multiple RoE objectives by name using fuzzy matching
+local function remall_roe(input)
+    -- Check if we have 0 active RoEs (status needs refresh)
+    if roe.active:length() == 0 then
+        eprint('No active RoE objectives detected. Please add an RoE objective to refresh the status.')
+        return
+    end
+    
+    -- Only works with name search, not ID
+    local id = tonumber(input)
+    if id then
+        eprint('remall: use "rem" command for specific ID numbers')
+        return
+    end
+    
+    -- Search for matches (require all words to match for bulk operations)
+    local results = find_roe_by_name(input, true)
+    
+    if #results == 0 then
+        eprint(('No RoE objectives found matching "%s"'):format(input))
+        return
+    elseif #results > 10 then
+        eprint(('Too many RoE objectives found matching "%s" (%d matches)'):format(input, #results))
+        eprint('Showing first 10 matches:')
+        for i = 1, 10 do
+            local result = results[i]
+            local status = ""
+            if not roe.active[result.id] then
+                status = " (not active)"
+            elseif roe.settings.blacklist[result.id] then
+                status = " (blacklisted)"
+            end
+            nprint(('  %d: %s (%.0f%% match)%s'):format(result.id, result.name, result.score * 100, status))
+        end
+        eprint('Please be more specific or use individual IDs.')
+        return
+    end
+    
+    -- Process all matches
+    local removed_count = 0
+    local skipped_count = 0
+    local skipped_reasons = {}
+    
+    for _, result in ipairs(results) do
+        if not roe.active[result.id] then 
+            skipped_count = skipped_count + 1
+            skipped_reasons[#skipped_reasons + 1] = ('%d (%s) - not currently active'):format(result.id, result.name)
+        elseif roe.settings.blacklist[result.id] then
+            skipped_count = skipped_count + 1
+            skipped_reasons[#skipped_reasons + 1] = ('%d (%s) - blacklisted'):format(result.id, result.name)
+        else
+            cancel_roe(result.id)
+            coroutine.sleep(0.5)
+            removed_count = removed_count + 1
+        end
+    end
+    
+    -- Report results
+    if removed_count > 0 then
+        nprint(('Removed %d RoE objectives matching "%s"'):format(removed_count, input))
+    end
+    
+    if skipped_count > 0 then
+        eprint(('Skipped %d objectives:'):format(skipped_count))
+        for _, reason in ipairs(skipped_reasons) do
+            eprint(('  %s'):format(reason))
+        end
+    end
+    
+    if removed_count == 0 and skipped_count == 0 then
+        eprint(('No objectives were processed for "%s"'):format(input))
+    end
+end
+
+-- Show current RoE status for debugging
+local function show_status()
+    nprint('Current RoE Status:')
+    nprint(('Active objectives: %d/%d'):format(roe.active:length(), roe.max_count))
+    
+    if roe.active:length() > 0 then
+        nprint('Active objectives:')
+        for id, progress in pairs(roe.active) do
+            local name = roe_mapping[id] or "Unknown"
+            nprint(('  %d: %s (%.0f%% progress)'):format(id, name, progress))
+        end
+    else
+        nprint('No active objectives found')
+    end
+    
+    nprint(('Completed objectives: %d'):format(roe.complete:length()))
+    nprint(('Blacklisted objectives: %d'):format(table.getn(roe.settings.blacklist)))
+    
+    -- Note: Status refresh requires adding an RoE objective
+    nprint('Note: If status appears incorrect, add an RoE objective to refresh the status.')
+end
+
 -- Print help text to chat
 local function help()
     nprint([[
@@ -250,6 +709,32 @@ ROE - Command List
 
 /roe help
     Show this help menu.
+
+/roe add <id or name>
+    Add a specific ROE objective by its ID number or name.
+    Examples:
+    /roe add 77
+    /roe add "spoils light crystal"
+    /roe add "vanquish enemy"
+
+/roe rem <id or name>
+    Remove a specific ROE objective by its ID number or name.
+    Examples:
+    /roe rem 77
+    /roe rem "spoils light crystal"
+    /roe rem "vanquish enemy"
+
+/roe addall <name>
+    Add all ROE objectives matching the name (max 10 matches).
+    Examples:
+    /roe addall "crystal"
+    /roe addall "vanquish"
+
+/roe remall <name>
+    Remove all ROE objectives matching the name (max 10 matches).
+    Examples:
+    /roe remall "crystal"
+    /roe remall "vanquish"
 
 /roe save <profile name>
     Save your currently set ROE objectives to a named profile.
@@ -276,6 +761,9 @@ ROE - Command List
 /roe blacklist [add|remove] <id>
     Add or remove a quest from the blacklist.
     - Blacklisted objectives will not be removed automatically.
+
+/roe status
+    Show current RoE status. If no active objectives are shown, add an RoE objective to refresh the status.
 ]])
 end
 
@@ -287,6 +775,11 @@ local handlers = {
     unset     = unset_profile,
     settings  = handle_setting,
     blacklist = blacklist,
+    add       = add_roe,
+    rem       = rem_roe,
+    addall    = addall_roe,
+    remall    = remall_roe,
+    status    = show_status,
     help      = help,
 }
 
@@ -299,12 +792,7 @@ ashita.events.register('command','roe_cmd',function(e)
     else nprint(('unknown roe sub-command: %s'):format(sub)) end
 end)
 
--- Build empty 0x112 packet to request RoE status
-local function request_roe_refresh()
-    local pkt = struct.pack('bbb', 0x112, 0x00, 0x00):totable()
-    AshitaCore:GetPacketManager():AddOutgoingPacket(0x112, pkt)
-    nprint('Requested RoE status refresh (startup).')
-end
+
 
 -- Check if world state is ready
 local function is_world_ready()
@@ -324,7 +812,7 @@ ashita.events.register('load','roe_load',function()
     end
     if _startup.sent then return end
     if is_world_ready() then
-        request_roe_refresh()
+        nprint('RoE addon loaded. Add an RoE objective to refresh status if needed.')
         _startup.sent = true
     end
 end)
