@@ -3,7 +3,7 @@
 -- Description: Create and manage RoE profiles with configurable settings
 
 addon.name    = 'roe'
-addon.version = '1.0.1'
+addon.version = '1.0.2'
 addon.author  = 'Original by Cair, ported by Commandobill'
 addon.desc    = 'Create and activate RoE profiles'
 addon.link    = 'https://github.com/commandobill/roe'
